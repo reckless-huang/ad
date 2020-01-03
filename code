@@ -1,0 +1,137 @@
+#! /usr/bin/env python
+# coding=UTF-8
+from ldap3 import Server, Connection, ALL, NTLM
+import getpass
+class ADoper():
+    '''
+    操作AD的类
+    '''
+    def __init__(self, domain, ip, admin='administrator', pwd=None):
+        '''
+        domain：域名，格式为：zhaopin.com
+        ip：ip地址，格式为：192.168.2.25
+        admin：管理员账号
+        pwd：管理员密码
+        '''
+        self.domain = domain
+        self.DC = ','.join(['DC=' + dc for dc in domain.split('.')])  #这里将domain处理为正确的格式，例如zhaopin.com转化为DC=zhaopin,DC=com
+        self.pre = domain.split('.')[0].upper() #用户登陆前缀,但我感觉这里的处理还是有问题的，后面在看看怎么优化
+        self.ip = ip
+        self.admin = admin
+        self.pwd = pwd
+        self.server = Server(self.ip, get_info=ALL)
+        self.conn = Connection(self.server, user=self.pre+'\\'+self.admin, password=self.pwd, auto_bind=True, authentication=NTLM)
+        #print(self.server)
+        #print(self.conn)
+
+
+    def search(self, org):
+        '''
+        查询特定org下的用户
+        org：组织，格式为aaa.bbb 即bbb组织下的aaa组织，不包含域地址
+        '''
+        att_list = ['displayName','userPrincipalName','userAccountControl','sAMAccountName','logonHours']  #分别查询显示名称，登陆名，用户状态512>open,514>close，2012前登陆名，最后登陆时间
+        org_base = ','.join(['OU=' + ou for ou in org.split('.')]) + ',' + self.DC   #处理serach_base格式
+        res = self.conn.search(search_base=org_base,  
+                search_filter='(objectclass=user)',    #定义查询数据类型这里为用户
+                attributes=att_list,   #定义查询哪些属性
+                paged_size=1000)     #一次查询1000条
+        #print(org_base)    #好奇心，这里处理的数据到底是列表还是字典呢
+        if res:
+            for user in self.conn.entries:
+                yield user['displayName']
+                #print(self.conn.entries)  #好奇心
+        else:
+            print('查询失败：', self.conn.result['description'])
+            #print(self.conn.result)    #好奇心
+            return None
+
+
+    def add_org(self, org):
+        '''
+        增加组织
+        org：组织，格式为aaa.bbb 即bbb组织下的aaa组织，不包含域地址
+        '''
+        org_base = ','.join(['OU=' + ou for ou in org.split('.')]) + ',' + self.DC   #处理serach_base格式
+        res = self.conn.add(org_base, object_class='OrganizationalUnit') #说明下因为因为默认采用同步策略，所以域控会及时返回True或False
+        if res:
+            print(f'增加组织[{org}]成功！')
+        else:
+            print(f'增加组织[{org}]发生错误，', self.conn.result['description'])
+
+
+    def add_user(self, org, name, uid):
+        '''
+        org：增加到该组织下
+        name：显示名称
+        uid：账号
+        '''
+        org_base = ','.join(['OU=' + ou for ou in org.split('.')]) + ',' + self.DC   #处理serach_base格式
+        user_att = {
+                'displayName' : name,
+                'userPrincipalName' : uid + '@' + self.domain,  #处理登陆名为uid@zhaopin.com
+                'userAccountControl' : '544',  #设置账号属性为启用
+                'sAMAccountName' : uid,
+                'pwdLastSet' : -1  #取消下次登陆需要修改密码
+                }
+        res = self.conn.add(f'CN={uid},{org_base}', object_class='user', attributes=user_att)
+        if res:
+            print(f'增加用户[{name}]成功！')
+        else:
+            print(f'增加用户[{name}]发生错误',self.conn.result['description'])
+
+
+    def del_user(self, DN):
+        '''
+        删除特定用户
+        DN：格式CN=10031817,OU=zhou,OU=shanghai,DC=zhilian,DC=com
+        '''
+        res = self.conn.delete(DN)
+        if res:
+            print(f'删除用户[{DN}]成功！')
+        else:
+            print(f'删除用户[{DN}]发生错误',self.conn.result['description'])
+
+
+    def del_org(self, DN):
+        '''
+        删除指定组织，注意组织下必须无子项目
+        DN：格式OU=zhou,OU=shanghai,DC=zhilian,DC=com
+        '''
+        res = self.conn.delete(DN)
+        if res:
+            print(f'删除组织[{DN}]成功！')
+        else:
+            print(f'删除组织[{DN}]发生错误',self.conn.result['description'])
+
+
+"""
+    #def ch_pwd(self, DN, new_pwd, old_pwd=None):
+        '''
+        修改密码
+        稍微搁置下，这里需要配置证书，AD仅接受ssl请求修改密码
+        '''
+        user = DN
+        new_password = new_pwd
+        old_password = old_pwd
+        res = self.conn.extend.microsoft.modify_password(user, new_password, old_password=None)
+        if res:
+            print('密码修改成功！')
+        else:
+            print('操作失败',self.conn.result['description'])
+"""
+
+
+if __name__ == '__main__':
+    domains = input('输入您的域名，ex:zhilian.com \n')
+    ips = input('输入服务器IP \n')
+    pwds = getpass.getpass('输入您的密码，账号默认为administrator \n')
+    ad = ADoper(domain=domains, ip=ips, pwd=pwds)
+    for user in ad.search('shanghai'):
+        print(user)
+    ad.add_org('yu.shanghai')
+    ad.add_user('zhou.shanghai', 'huangyufeng03', '10031817')
+    ad.add_user('zhou.shanghai', 'huangyufeng02', '10031816')
+    ad.del_user('CN=10031817,OU=zhou,OU=shanghai,DC=zhilian,DC=com')
+    ad.del_org('OU=yu,OU=shanghai,DC=zhilian,DC=com')
+    #ad.ch_pwd('CN=10031817,OU=zhou,OU=shanghai,DC=zhilian,DC=com','reckless0211')
